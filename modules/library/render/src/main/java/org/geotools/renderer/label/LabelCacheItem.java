@@ -42,6 +42,8 @@ import com.vividsolutions.jts.geom.Geometry;
  * @source $URL$
  */
 public class LabelCacheItem implements Comparable<LabelCacheItem> {
+
+   
     
     public enum GraphicResize {NONE, STRETCH, PROPORTIONAL};
 
@@ -94,6 +96,8 @@ public class LabelCacheItem implements Comparable<LabelCacheItem> {
     }
 
     boolean partialsEnabled = false;
+   
+    boolean letterConflictEnabled = false;
 
     /**
      * A value between 0 and 1 representing the portion of the label
@@ -132,6 +136,14 @@ public class LabelCacheItem implements Comparable<LabelCacheItem> {
 
     public void setPriority(double d) {
         priority = d;
+    }
+    
+    public boolean getLetterConflictEnabled(){
+        return letterConflictEnabled;
+    }
+    
+    public void setLetterConflictEnabled(boolean letterConflictEnabled){
+        this.letterConflictEnabled = letterConflictEnabled;
     }
 
     /**
