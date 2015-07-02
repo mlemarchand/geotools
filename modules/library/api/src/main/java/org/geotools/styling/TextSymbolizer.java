@@ -261,6 +261,16 @@ public interface TextSymbolizer extends org.opengis.style.TextSymbolizer,Symboli
      * 'proportional'.
      */
     public static String GRAPHIC_RESIZE_KEY = "graphic-resize";
+    
+    /**
+     * Option to check each letters for conflict instead of the whole label
+     */
+    public static String LETTER_CONFLICT_ENABLED_KEY = "letterConflictEnabled";
+    
+    /**
+     * Default value for the letterConflictEnabled
+     */
+    public static boolean DEFAULT_LETTER_CONFLICT_ENABLED = true;
 
     
     /**
