@@ -69,6 +69,7 @@ import com.vividsolutions.jts.geom.Polygon;
 import com.vividsolutions.jts.geom.prep.PreparedGeometry;
 import com.vividsolutions.jts.geom.prep.PreparedGeometryFactory;
 import com.vividsolutions.jts.operation.linemerge.LineMerger;
+import java.awt.geom.Point2D;
 
 /**
  * Default LabelCache Implementation.
@@ -340,10 +341,10 @@ public final class LabelCacheImpl implements LabelCache {
         item.setGraphicMargin(voParser.getGraphicMargin(symbolizer, "graphic-margin"));
         item.setPartialsEnabled(voParser.getBooleanOption(symbolizer, PARTIALS_KEY, DEFAULT_PARTIALS));
 
+        item.setLetterConflictEnabled(voParser.getBooleanOption(symbolizer, TextSymbolizer.LETTER_CONFLICT_ENABLED_KEY, TextSymbolizer.DEFAULT_LETTER_CONFLICT_ENABLED));
+        
         return item;
     }
-    
-    
 
     /**
      * @see org.geotools.renderer.lite.LabelCache#endLayer(String,Graphics2D,Rectangle)
@@ -388,7 +389,6 @@ public final class LabelCacheImpl implements LabelCache {
         for (String layerName : layerIds) {
             if (enabledLayers.contains(layerName))
                 return true;
-
         }
         return false;
     }
@@ -417,7 +417,97 @@ public final class LabelCacheImpl implements LabelCache {
             graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, antialiasing);
         }
     }
+    
+    void paintLabels(Graphics2D graphics, Rectangle displayArea) {
+        if (!activeLayers.isEmpty()) {
+            throw new IllegalStateException(activeLayers
+                    + " are layers that started rendering but have not completed,"
+                    + " stop() or endLayer() must be called before end() is called");
+        }
+        LabelIndex glyphs = new LabelIndex();
+        glyphs.reserveArea( reserved );
 
+        //Used to check the paintLineLabel function
+        boolean painted;
+        int nonPaintedLabels = 0;
+        int paintedLabels = 0;
+
+        // Hack: let's reduce the display area width and height by one pixel.
+        // If the rendered image is 256x256, proper rendering of polygons and
+        // lines occurr only if the display area is [0,0; 256,256], yet if you
+        // try to render anything at [x,256] or [256,y] it won't show.
+        // So, to avoid labels that happen to touch the border being cut
+        // by one pixel, we reduce the display area.
+        // Feels hackish, don't have a better solution at the moment thought
+        displayArea = new Rectangle(displayArea);
+        displayArea.width -= 1;
+        displayArea.height -= 1;
+
+        // prepare the geometry clipper
+        clipper = new GeometryClipper(new Envelope(displayArea.getMinX(), displayArea.getMaxX(), displayArea.getMinY(), displayArea.getMaxY()));
+
+        List<LabelCacheItem> items; // both grouped and non-grouped
+        if (needsOrdering) {
+            items = orderedLabels();
+        } else {
+            items = getActiveLabels();
+        }
+        LabelPainter painter = new LabelPainter(graphics, labelRenderingMode);
+        for (LabelCacheItem labelItem : items) {
+            if (stop)
+                return;
+
+            painter.setLabel(labelItem);
+            try {
+                // LabelCacheItem labelItem = (LabelCacheItem)
+                // labelCache.get(labelIter.next());
+
+                // DJB: simplified this. Just send off to the point,line,or
+                // polygon routine
+                // NOTE: labelItem.getGeometry() returns the FIRST geometry, so
+                // we're assuming that lines & points arent mixed
+                // If they are, then the FIRST geometry determines how its
+                // rendered (which is probably bad since it should be in
+                // area,line,point order
+                // TOD: as in NOTE above
+
+                /*
+                 * Just use identity for tempTransform because display area is
+                 * 0,0,width,height and oldTransform may have a different
+                 * origin. OldTransform will be used later for drawing. -rg & je
+                 */
+                AffineTransform tempTransform = new AffineTransform();
+
+                Geometry geom = labelItem.getGeometry();
+                if ((geom instanceof Point) || (geom instanceof MultiPoint))
+                    paintPointLabel(painter, tempTransform, displayArea, glyphs);
+                else if (((geom instanceof LineString) && !(geom instanceof LinearRing))
+                        || (geom instanceof MultiLineString)){
+                     if(labelItem.letterConflictEnabled)
+                         painted = paintLineLabelsWithLetterConflict(painter, tempTransform, displayArea, glyphs);
+                     else 
+                         painted = paintLineLabels(painter, tempTransform, displayArea, glyphs);
+                     if (!painted){
+                         nonPaintedLabels++;
+                     } else paintedLabels++;
+                }
+                else if (geom instanceof Polygon || geom instanceof MultiPolygon
+                        || geom instanceof LinearRing)
+                    paintPolygonLabel(painter, tempTransform, displayArea, glyphs);
+            } catch (Exception e) {
+                System.out.println("Issues painting " + labelItem.getLabel());
+                // the decimation can cause problems - we try to minimize it
+                // do nothing
+                e.printStackTrace();
+            }
+        }
+        LOGGER.log(Level.WARNING, "TOTAL LABELS : {0}", items.size());
+        LOGGER.log(Level.WARNING, "PAINTED LABELS : {0}", paintedLabels);
+        LOGGER.log(Level.WARNING, "REMAINING LABELS : {0}", nonPaintedLabels);
+    }
+
+    //Old version
+    /*
     void paintLabels(Graphics2D graphics, Rectangle displayArea) {
         if (!activeLayers.isEmpty()) {
             throw new IllegalStateException(activeLayers
@@ -470,7 +560,7 @@ public final class LabelCacheImpl implements LabelCache {
                  * Just use identity for tempTransform because display area is
                  * 0,0,width,height and oldTransform may have a different
                  * origin. OldTransform will be used later for drawing. -rg & je
-                 */
+                 *
                 AffineTransform tempTransform = new AffineTransform();
 
                 Geometry geom = labelItem.getGeometry();
@@ -490,7 +580,7 @@ public final class LabelCacheImpl implements LabelCache {
             }
         }
     }
-
+*/
     private Envelope toEnvelope(Rectangle2D bounds) {
         return new Envelope(bounds.getMinX(), bounds.getMaxX(), bounds.getMinY(), bounds.getMaxY());
     }
@@ -567,7 +657,286 @@ public final class LabelCacheImpl implements LabelCache {
         }
         return 0.0;
     }
+    
+    //Modified version of paintLineLabels
+    //We compute the Bounding box for each letters instead of the whole label
+    //then we check each letters for collision
+    private boolean paintLineLabelsWithLetterConflict(LabelPainter painter, AffineTransform originalTransform,
+            Rectangle displayArea, LabelIndex paintedBounds) throws Exception {
+        final LabelCacheItem labelItem = painter.getLabel();
+        List<LineString> lines = (List<LineString>) getLineSetRepresentativeLocation(
+                labelItem.getGeoms(), displayArea, labelItem.removeGroupOverlaps(),
+                labelItem.isPartialsEnabled());
 
+        if (lines == null || lines.size() == 0)
+            return false;
+
+        // if we just want to label the longest line, remove the others
+        if (!labelItem.labelAllGroup() && lines.size() > 1) {
+            lines = Collections.singletonList(lines.get(0));
+        }
+
+        // pre compute some labelling params
+        final Rectangle2D textBounds = painter.getFullLabelBounds();
+        // ... use at least a 2 pixel step, no matter what the label length is
+        final double step = painter.getAscent() > 2 ? painter.getAscent() : 2;
+        int space = labelItem.getSpaceAround();
+        int haloRadius = Math.round(labelItem.getTextStyle().getHaloFill() != null ? labelItem
+                .getTextStyle().getHaloRadius() : 0);
+        int extraSpace = space + haloRadius;
+        // repetition distance, if any
+        int labelDistance = labelItem.getRepeat();
+        // min distance, if any
+        int minDistance = labelItem.getMinGroupDistance();
+        LabelIndex groupLabels = new LabelIndex();
+        // Max displacement for the current label
+        double labelOffset = labelItem.getMaxDisplacement();
+        boolean allowOverruns = labelItem.allowOverruns();
+        double maxAngleDelta = labelItem.getMaxAngleDelta();
+        
+        //Used to retrieve the bounding boxes of each letter composing the label
+        GlyphVector glyphVector = painter.layoutSentence(labelItem.getLabel(), labelItem);
+
+        int labelCount = 0;
+        for (LineString line : lines) {
+            // if we are following lines, use a simplified version of the line,
+            // we don't want very small segments to influence the character
+            // orientation
+            if (labelItem.isFollowLineEnabled())
+                line = decimateLineString(line, step);
+
+            // max distance between candidate label points, if any
+            final double lineStringLength = line.getLength();
+
+            // if the line is too small compared to the label, don't label it
+            // and exit right away, since the lines are sorted from longest to
+            // shortest
+            if ((!allowOverruns || labelItem.isFollowLineEnabled())
+                    && line.getLength() < textBounds.getWidth()){
+                return labelCount > 0;
+            }
+
+            // create the candidate positions for the labels over the line. If
+            // we can place just one
+            // label or we're not supposed to replicate them, create the mid
+            // position, otherwise
+            // create mid and then create the sequence of before and after
+            // labels
+            double[] labelPositions;
+            if (labelDistance > 0 && labelDistance < lineStringLength / 2) {
+                labelPositions = new double[(int) (lineStringLength / (labelDistance*0.5))];
+                labelPositions[0] = lineStringLength / 2;
+                double offset = labelDistance;
+                for (int i = 1; i < labelPositions.length; i++) {
+                    labelPositions[i] = labelPositions[i - 1] + offset;
+                    // this will generate a sequence like s, -2s, 3s, -4s, ...
+                    // which will make the cursor alternate on mid + s, mid - s,
+                    // mid + 2s, mid - 2s, mid + 3s, ...
+                    double signum = Math.signum(offset);
+                    offset = -1 * signum * (Math.abs(offset) + labelDistance);
+                }
+            } else {
+                labelPositions = new double[1];
+                labelPositions[0] = lineStringLength / 2;
+            }
+            
+            // Ok, now we try to paint each of the labels in each position, and
+            // we take into
+            // account that we might have to displace the labels
+            LineStringCursor cursor = new LineStringCursor(line);
+            AffineTransform tx = new AffineTransform();
+            for (int i = 0; i < labelPositions.length; i++) {
+                cursor.moveTo(labelPositions[i]);
+                Coordinate centroid = cursor.getCurrentPosition();
+                double currOffset = 0;
+
+                // label displacement loop
+                boolean painted = false;
+                //while (Math.abs(currOffset) <= labelOffset && !painted) {
+                while (Math.abs(currOffset) <= labelOffset*2 && !painted) {
+                    // reset transform and other computation parameters
+                    tx.setToIdentity();
+                    Rectangle2D labelEnvelope;
+                    double maxAngleChange = 0;
+                    boolean curved = false;
+
+                    // the line ordinates where we presume the label will start
+                    // and end (using full bounds,
+                    // thus taking into account shield and halo)
+                    double startOrdinate = cursor.getCurrentOrdinate() - textBounds.getWidth() / 2;
+                    double endOrdinate = cursor.getCurrentOrdinate() + textBounds.getWidth() / 2;
+
+                    // compute label bounds
+                    if (labelItem.followLineEnabled) {
+                        // curved label, but we might end up drawing a straight
+                        // one as an optimization
+                        maxAngleChange = cursor.getMaxAngleChange(startOrdinate, endOrdinate);
+                        if (maxAngleChange < MIN_CURVED_DELTA) {
+                            // if label will be painted as straight, use the
+                            // straight bounds
+                            setupLineTransform(painter, cursor, centroid, tx, true);
+                        } else {
+                            // otherwise use curved bounds, more expensive to
+                            // compute
+                            curved = true;
+                        }
+                    } else {
+                        setupLineTransform(painter, cursor, centroid, tx, false);
+                    }
+
+                    int numGlyph = glyphVector.getNumGlyphs();
+                    boolean collision = false;
+                    AffineTransform[] transforms = null;
+                    //For curved labels, we the glyph's bounding box
+                    //to follow the line
+                    if (curved){
+                        transforms = new AffineTransform[numGlyph];
+                        LineStringCursor oldCursor = new LineStringCursor(cursor);
+                        getGlyphTransforms(painter, glyphVector, transforms, oldCursor);
+                    }
+
+                    //We each letters for collision
+                    int it = 0;
+                    while (it<numGlyph && !collision){
+                        if (curved)
+                            labelEnvelope = transforms[it].createTransformedShape(glyphVector.getGlyphLogicalBounds(it)).getBounds2D();
+                        else 
+                            labelEnvelope = tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(it)).getBounds2D();
+
+                        // try to paint the label, the condition under which this
+                        // happens are complex
+                        if ((displayArea.contains(labelEnvelope) || labelItem.isPartialsEnabled()) &&
+                            !(labelItem.isConflictResolutionEnabled() && paintedBounds.labelsWithinDistance(labelEnvelope, extraSpace)) &&
+                                ! groupLabels.labelsWithinDistance(labelEnvelope, minDistance))
+                            //move to next glyph
+                                    it++;
+                        else collision = true;
+                    }
+
+                    //If none of the glyphs intersects a bounding box, we paint the label
+                    if (!collision){
+                            if (labelItem.isFollowLineEnabled()) {
+                                // for curved labels we never paint in case of
+                                // overrun
+                                if ((startOrdinate > 0 && endOrdinate <= cursor.getLineStringLength())) {
+                                    if (maxAngleChange < maxAngleDelta) {
+                                        // if the max angle is very small, draw it
+                                        // like a straight line
+                                        if (maxAngleChange < MIN_CURVED_DELTA)
+                                            painter.paintStraightLabel(tx);
+                                        else
+                                            painter.paintCurvedLabel(cursor);
+                                        painted = true;
+                                    }
+                                }
+                            } else {
+                                // for straight labels, check overrun only if
+                                // required
+                                if ((allowOverruns || (startOrdinate > 0 && endOrdinate <= cursor
+                                        .getLineStringLength()))) {
+                                    painter.paintStraightLabel(tx);
+                                    painted = true;
+                                }
+                            }
+                        }
+
+                    // if we actually painted the label, add the envelope to the
+                    // indexes and break out of the loop,
+                    // otherwise move to the next candidate position in the
+                    // displacement sequence
+                    if (painted) {
+                        labelCount++;                        
+                        //Add each glyph's bounding box to the index
+                        for (int j=0; j<numGlyph; j++){
+                            if (curved)
+                                labelEnvelope = transforms[j].createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D();
+                            else
+                                labelEnvelope = tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D();
+                            groupLabels.addLabel(labelItem, labelEnvelope);
+                        }
+
+                        if(labelItem.isConflictResolutionEnabled()) {
+                            if(DEBUG_CACHE_BOUNDS) {
+                                painter.graphics.setStroke(new BasicStroke());
+                                painter.graphics.setColor(Color.GREEN);
+                                for (int j=0; j<numGlyph; j++){
+                                    if (curved)
+                                        painter.graphics.draw(transforms[j].createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
+                                    else
+                                        painter.graphics.draw(tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
+                                }
+                            }
+                           //Add each glyph's bounding box to the index
+                           for (int j=0; j<numGlyph; j++){
+                               if (curved)
+                                   labelEnvelope = transforms[j].createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D();
+                               else
+                                   labelEnvelope = tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D();
+                               paintedBounds.addLabel(labelItem, labelEnvelope);
+                           }
+                        }
+                    } else {
+                /*      //Use to draw the bounding boxes of non placed labels 
+                        painter.graphics.setStroke(new BasicStroke());
+                        painter.graphics.setColor(Color.RED);
+                        for (int j=0; j<numGlyph; j++){
+                            if (curved)
+                                painter.graphics.draw(transforms[j].createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
+                            else
+                                painter.graphics.draw(tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
+                        }
+               */       // this will generate a sequence like s, -2s, 3s, -4s,
+                        // ...
+                        // which will make the cursor alternate on mid + s, mid
+                        // - s, mid + 2s, mid - 2s, mid + 3s, ...
+                        double signum = Math.signum(currOffset);
+                        if (signum == 0) {
+                            currOffset = step;
+                        } else {
+                            currOffset = -1 * signum * (Math.abs(currOffset) + step);
+                        }
+                        cursor.moveRelative(currOffset);
+                        cursor.getCurrentPosition(centroid);
+                    }
+                }
+            }
+        }
+        return labelCount > 0;
+    }
+
+    //We want the bounding box of each glyph so they follow the line 
+    //but without the orientation
+    //Part of paintCurvedLabel from LabelPainter without the actual painting
+    private void getGlyphTransforms(LabelPainter painter, GlyphVector gv, AffineTransform[] transforms, LineStringCursor cursor){
+        
+        double anchorY = painter.getLinePlacementYAnchor();
+        // init, move to the starting position
+        double mid = cursor.getCurrentOrdinate();
+        Coordinate c = new Coordinate();
+        c = cursor.getCurrentPosition(c);
+
+        double startOrdi = mid - painter.getStraightLabelWidth() / 2;
+        if (startOrdi < 0)
+            startOrdi = 0;
+        cursor.moveTo(startOrdi);
+        final int numGlyphs = gv.getNumGlyphs();
+        float nextAdvance = gv.getGlyphMetrics(0).getAdvance() * 0.5f;
+        for (int j = 0; j < numGlyphs; j++) {
+            Point2D p = gv.getGlyphPosition(j);
+            float advance = nextAdvance;
+            nextAdvance = j < numGlyphs - 1 ? gv.getGlyphMetrics(j + 1).getAdvance() * 0.5f
+                    : 0;
+
+            c = cursor.getCurrentPosition(c);
+            AffineTransform t = new AffineTransform();
+            t.setToTranslation(c.x, c.y);
+            t.translate(-p.getX() - advance, -p.getY() + painter.getLineHeight() * anchorY);
+            transforms[j] = t;
+
+            cursor.moveTo(cursor.getCurrentOrdinate() + advance + nextAdvance);
+        }
+    }
+    
     private boolean paintLineLabels(LabelPainter painter, AffineTransform originalTransform,
             Rectangle displayArea, LabelIndex paintedBounds) throws Exception {
         final LabelCacheItem labelItem = painter.getLabel();
