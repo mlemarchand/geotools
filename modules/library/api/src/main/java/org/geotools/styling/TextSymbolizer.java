@@ -270,7 +270,7 @@ public interface TextSymbolizer extends org.opengis.style.TextSymbolizer,Symboli
     /**
      * Default value for the letterConflictEnabled
      */
-    public static boolean DEFAULT_LETTER_CONFLICT_ENABLED = true;
+    public static boolean DEFAULT_LETTER_CONFLICT_ENABLED = false;
 
     
     /**
