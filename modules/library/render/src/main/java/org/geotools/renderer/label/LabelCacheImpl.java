@@ -427,11 +427,6 @@ public final class LabelCacheImpl implements LabelCache {
         LabelIndex glyphs = new LabelIndex();
         glyphs.reserveArea( reserved );
 
-        //Used to check the paintLineLabel function
-        boolean painted;
-        int nonPaintedLineLabels = 0;
-        int paintedLineLabels = 0;
-
         // Hack: let's reduce the display area width and height by one pixel.
         // If the rendered image is 256x256, proper rendering of polygons and
         // lines occurr only if the display area is [0,0; 256,256], yet if you
@@ -485,12 +480,9 @@ public final class LabelCacheImpl implements LabelCache {
                         || (geom instanceof MultiLineString)){
                     //We only use this if there is curved labels
                      if(labelItem.getLetterConflictEnabled())
-                         painted = paintLineLabelsWithLetterConflict(painter, tempTransform, displayArea, glyphs);
+                         paintLineLabelsWithLetterConflict(painter, tempTransform, displayArea, glyphs);
                      else 
-                         painted = paintLineLabels(painter, tempTransform, displayArea, glyphs);
-                     if (!painted){
-                         nonPaintedLineLabels++;
-                     } else paintedLineLabels++;
+                         paintLineLabels(painter, tempTransform, displayArea, glyphs);                
                 }
                 else if (geom instanceof Polygon || geom instanceof MultiPolygon
                         || geom instanceof LinearRing)
@@ -502,10 +494,6 @@ public final class LabelCacheImpl implements LabelCache {
                 e.printStackTrace();
             }
         }
-        //Output for line labels
-        LOGGER.log(Level.WARNING, "TOTAL LABELS : {0}", items.size());
-        LOGGER.log(Level.WARNING, "PAINTED LINE LABELS : {0}", paintedLineLabels);
-        LOGGER.log(Level.WARNING, "REMAINING LABELS : {0}", nonPaintedLineLabels);
     }
 
     //Old version
