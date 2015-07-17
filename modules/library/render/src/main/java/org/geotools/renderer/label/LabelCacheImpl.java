@@ -429,8 +429,8 @@ public final class LabelCacheImpl implements LabelCache {
 
         //Used to check the paintLineLabel function
         boolean painted;
-        int nonPaintedLabels = 0;
-        int paintedLabels = 0;
+        int nonPaintedLineLabels = 0;
+        int paintedLineLabels = 0;
 
         // Hack: let's reduce the display area width and height by one pixel.
         // If the rendered image is 256x256, proper rendering of polygons and
@@ -483,13 +483,14 @@ public final class LabelCacheImpl implements LabelCache {
                     paintPointLabel(painter, tempTransform, displayArea, glyphs);
                 else if (((geom instanceof LineString) && !(geom instanceof LinearRing))
                         || (geom instanceof MultiLineString)){
-                     if(labelItem.letterConflictEnabled)
+                    //We only use this if there is curved labels
+                     if(labelItem.getLetterConflictEnabled())
                          painted = paintLineLabelsWithLetterConflict(painter, tempTransform, displayArea, glyphs);
                      else 
                          painted = paintLineLabels(painter, tempTransform, displayArea, glyphs);
                      if (!painted){
-                         nonPaintedLabels++;
-                     } else paintedLabels++;
+                         nonPaintedLineLabels++;
+                     } else paintedLineLabels++;
                 }
                 else if (geom instanceof Polygon || geom instanceof MultiPolygon
                         || geom instanceof LinearRing)
@@ -501,9 +502,10 @@ public final class LabelCacheImpl implements LabelCache {
                 e.printStackTrace();
             }
         }
+        //Output for line labels
         LOGGER.log(Level.WARNING, "TOTAL LABELS : {0}", items.size());
-        LOGGER.log(Level.WARNING, "PAINTED LABELS : {0}", paintedLabels);
-        LOGGER.log(Level.WARNING, "REMAINING LABELS : {0}", nonPaintedLabels);
+        LOGGER.log(Level.WARNING, "PAINTED LINE LABELS : {0}", paintedLineLabels);
+        LOGGER.log(Level.WARNING, "REMAINING LABELS : {0}", nonPaintedLineLabels);
     }
 
     //Old version
@@ -660,7 +662,7 @@ public final class LabelCacheImpl implements LabelCache {
     
     //Modified version of paintLineLabels
     //We compute the Bounding box for each letters instead of the whole label
-    //then we check each letters for collision
+    //then we check each letters for collisions
     private boolean paintLineLabelsWithLetterConflict(LabelPainter painter, AffineTransform originalTransform,
             Rectangle displayArea, LabelIndex paintedBounds) throws Exception {
         final LabelCacheItem labelItem = painter.getLabel();
@@ -685,7 +687,8 @@ public final class LabelCacheImpl implements LabelCache {
                 .getTextStyle().getHaloRadius() : 0);
         int extraSpace = space + haloRadius;
         // repetition distance, if any
-        int labelDistance = labelItem.getRepeat();
+        //We extend this distance for a better placement of long labels
+        int labelDistance = (int) (labelItem.getRepeat() > 0 ? labelItem.getRepeat() + (textBounds.getWidth()*2) : 0);
         // min distance, if any
         int minDistance = labelItem.getMinGroupDistance();
         LabelIndex groupLabels = new LabelIndex();
@@ -733,8 +736,8 @@ public final class LabelCacheImpl implements LabelCache {
                     // which will make the cursor alternate on mid + s, mid - s,
                     // mid + 2s, mid - 2s, mid + 3s, ...
                     double signum = Math.signum(offset);
-                    offset = -1 * signum * (Math.abs(offset) + labelDistance);
-                }
+                    offset = -1 * signum * (Math.abs(offset) + labelDistance );
+                }   
             } else {
                 labelPositions = new double[1];
                 labelPositions[0] = lineStringLength / 2;
@@ -749,14 +752,14 @@ public final class LabelCacheImpl implements LabelCache {
                 cursor.moveTo(labelPositions[i]);
                 Coordinate centroid = cursor.getCurrentPosition();
                 double currOffset = 0;
-
+                
                 // label displacement loop
                 boolean painted = false;
-                //while (Math.abs(currOffset) <= labelOffset && !painted) {
-                while (Math.abs(currOffset) <= labelOffset*2 && !painted) {
+                //The displacement limit is augmented for better flexibility
+                while (Math.abs(currOffset) <= (labelOffset + (textBounds.getWidth())) && !painted) {
                     // reset transform and other computation parameters
                     tx.setToIdentity();
-                    Rectangle2D labelEnvelope;
+                    Rectangle2D labelEnvelope = null;
                     double maxAngleChange = 0;
                     boolean curved = false;
 
@@ -783,11 +786,11 @@ public final class LabelCacheImpl implements LabelCache {
                     } else {
                         setupLineTransform(painter, cursor, centroid, tx, false);
                     }
-
+                    
                     int numGlyph = glyphVector.getNumGlyphs();
                     boolean collision = false;
                     AffineTransform[] transforms = null;
-                    //For curved labels, we the glyph's bounding box
+                    //For curved labels, we want the glyph's bounding box
                     //to follow the line
                     if (curved){
                         transforms = new AffineTransform[numGlyph];
@@ -795,7 +798,7 @@ public final class LabelCacheImpl implements LabelCache {
                         getGlyphTransforms(painter, glyphVector, transforms, oldCursor);
                     }
 
-                    //We each letters for collision
+                    //We check each letters for collision
                     int it = 0;
                     while (it<numGlyph && !collision){
                         if (curved)
@@ -813,7 +816,8 @@ public final class LabelCacheImpl implements LabelCache {
                         else collision = true;
                     }
 
-                    //If none of the glyphs intersects a bounding box, we paint the label
+                    //If none of the glyphs intersects a bounding box,
+                    //we paint the label
                     if (!collision){
                             if (labelItem.isFollowLineEnabled()) {
                                 // for curved labels we never paint in case of
@@ -858,14 +862,15 @@ public final class LabelCacheImpl implements LabelCache {
                         if(labelItem.isConflictResolutionEnabled()) {
                             if(DEBUG_CACHE_BOUNDS) {
                                 painter.graphics.setStroke(new BasicStroke());
-                                painter.graphics.setColor(Color.GREEN);
+                                painter.graphics.setColor(Color.RED);
                                 for (int j=0; j<numGlyph; j++){
                                     if (curved)
                                         painter.graphics.draw(transforms[j].createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
                                     else
                                         painter.graphics.draw(tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
-                                }
                             }
+                        }                            
+                            
                            //Add each glyph's bounding box to the index
                            for (int j=0; j<numGlyph; j++){
                                if (curved)
@@ -875,17 +880,10 @@ public final class LabelCacheImpl implements LabelCache {
                                paintedBounds.addLabel(labelItem, labelEnvelope);
                            }
                         }
+
                     } else {
-                /*      //Use to draw the bounding boxes of non placed labels 
-                        painter.graphics.setStroke(new BasicStroke());
-                        painter.graphics.setColor(Color.RED);
-                        for (int j=0; j<numGlyph; j++){
-                            if (curved)
-                                painter.graphics.draw(transforms[j].createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
-                            else
-                                painter.graphics.draw(tx.createTransformedShape(glyphVector.getGlyphLogicalBounds(j)).getBounds2D());
-                        }
-               */       // this will generate a sequence like s, -2s, 3s, -4s,
+
+                      // this will generate a sequence like s, -2s, 3s, -4s,
                         // ...
                         // which will make the cursor alternate on mid + s, mid
                         // - s, mid + 2s, mid - 2s, mid + 3s, ...
@@ -897,7 +895,7 @@ public final class LabelCacheImpl implements LabelCache {
                         }
                         cursor.moveRelative(currOffset);
                         cursor.getCurrentPosition(centroid);
-                    }
+                    }                    
                 }
             }
         }
@@ -1326,7 +1324,7 @@ public final class LabelCacheImpl implements LabelCache {
     }
     
     /**
-     * Returns the closest angle that is a multiple of 45°
+     * Returns the closest angle that is a multiple of 45Â°
      * @param x
      * @param y
      * @return an angle in degrees
